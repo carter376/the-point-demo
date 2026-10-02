@@ -5,6 +5,42 @@ const GOOGLE_BOOKING_URL = "https://calendar.app.google/6wzwpNBtrfCdhj8T8";
 // Opening hours by weekday (1 = Monday), in minutes after midnight. Days not listed are closed.
 const HOURS = { 1: [570, 870], 2: [570, 870], 3: [570, 870], 4: [570, 870], 5: [600, 720] };
 const MAX_DAYS_AHEAD = 28;
+// Major holidays The Point is closed for (Alberta statutory holidays plus Easter Monday, Heritage Day, Truth and Reconciliation Day and Boxing Day).
+// Fixed-date holidays that land on a weekend are observed on the next free weekday.
+function dateKey(date) { return date.toLocaleDateString("en-CA"); }
+function nthMonday(year, month, n) { const date = new Date(year, month, 1); date.setDate(1 + ((8 - date.getDay()) % 7) + (n - 1) * 7); return date; }
+function easterSunday(year) {
+  const a = year % 19, b = Math.floor(year / 100), c = year % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+  return new Date(year, Math.floor((h + l - 7 * m + 114) / 31) - 1, ((h + l - 7 * m + 114) % 31) + 1);
+}
+const holidayCache = {};
+function holidaysFor(year) {
+  if (holidayCache[year]) return holidayCache[year];
+  const holidays = {};
+  const fixed = (name, month, day) => {
+    const date = new Date(year, month, day);
+    while (date.getDay() === 0 || date.getDay() === 6 || holidays[dateKey(date)]) date.setDate(date.getDate() + 1);
+    holidays[dateKey(date)] = name;
+  };
+  const easter = easterSunday(year);
+  const victoriaDay = new Date(year, 4, 24); victoriaDay.setDate(24 - ((victoriaDay.getDay() + 6) % 7));
+  holidays[dateKey(nthMonday(year, 1, 3))] = "Family Day";
+  holidays[dateKey(new Date(year, easter.getMonth(), easter.getDate() - 2))] = "Good Friday";
+  holidays[dateKey(new Date(year, easter.getMonth(), easter.getDate() + 1))] = "Easter Monday";
+  holidays[dateKey(victoriaDay)] = "Victoria Day";
+  holidays[dateKey(nthMonday(year, 7, 1))] = "Heritage Day";
+  holidays[dateKey(nthMonday(year, 8, 1))] = "Labour Day";
+  holidays[dateKey(nthMonday(year, 9, 2))] = "Thanksgiving";
+  fixed("New Year’s Day", 0, 1);
+  fixed("Canada Day", 6, 1);
+  fixed("National Day for Truth and Reconciliation", 8, 30);
+  fixed("Remembrance Day", 10, 11);
+  fixed("Christmas Day", 11, 25);
+  fixed("Boxing Day", 11, 26);
+  return holidayCache[year] = holidays;
+}
+function holidayOn(date) { return holidaysFor(date.getFullYear())[dateKey(date)]; }
 let dayOffset = 0;
 const schedule = document.querySelector("#schedule");
 const dateLabel = document.querySelector("#dateLabel");
@@ -17,7 +53,8 @@ textLink.href = `sms:${CONTACT.phone}`;
 emailLink.href = `mailto:${CONTACT.email}`;
 function notify(message) { toast.textContent = message; toast.classList.add("show"); setTimeout(() => toast.classList.remove("show"), 4000); }
 // Sends a form's answers to CONTACT.email. Returns "sent" via Formspree, or "email" when it falls back to the visitor's email app.
-async function sendToInbox(subject, body, replyTo) {
+async function sendToInbox(subject, body, replyTo, trap) {
+  if (trap) return "sent";
   if (!FORMSPREE_FORM_ID) {
     window.location.href = `mailto:${CONTACT.email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
     return "email";
@@ -25,7 +62,7 @@ async function sendToInbox(subject, body, replyTo) {
   const response = await fetch(`https://formspree.io/f/${FORMSPREE_FORM_ID}`, {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
-    body: JSON.stringify({ _subject: subject, message: body, ...(replyTo?.includes("@") && { email: replyTo }) })
+    body: JSON.stringify({ _subject: subject, message: body, _gotcha: trap, ...(replyTo?.includes("@") && { email: replyTo }) })
   });
   if (!response.ok) throw new Error(`Formspree responded ${response.status}`);
   return "sent";
@@ -34,7 +71,7 @@ async function submitForm(form, dialog, subject, body, replyTo, messages) {
   const button = form.querySelector("[type=submit]");
   button.disabled = true;
   try {
-    const result = await sendToInbox(subject, body, replyTo);
+    const result = await sendToInbox(subject, body, replyTo, new FormData(form).get("_gotcha"));
     dialog.close();
     form.reset();
     notify(messages[result]);
@@ -51,6 +88,7 @@ function selectedDate() { const date = new Date(); date.setHours(0, 0, 0, 0); da
 function renderSlots() {
   const date = selectedDate();
   const hours = HOURS[date.getDay()];
+  const holiday = holidayOn(date);
   const dateText = date.toLocaleDateString("en-CA", { weekday: "short", month: "short", day: "numeric" });
   dateLabel.textContent = dayOffset === 0 ? `Today · ${dateText}` : dayOffset === 1 ? `Tomorrow · ${dateText}` : dateText;
   prevDay.disabled = dayOffset === 0;
@@ -58,7 +96,8 @@ function renderSlots() {
   const now = new Date();
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   let slots = "";
-  if (!hours) slots = `<p class="closed-day">The Point is closed on weekends. Use the arrows to pick a weekday.</p>`;
+  if (holiday) slots = `<p class="closed-day">The Point is closed for ${holiday}. Use the arrows to pick another day.</p>`;
+  else if (!hours) slots = `<p class="closed-day">The Point is closed on weekends. Use the arrows to pick a weekday.</p>`;
   else for (let start = hours[0]; start < hours[1]; start += 60) {
     const past = dayOffset === 0 && start + 60 <= nowMinutes;
     slots += `<button class="slot" ${past ? "disabled" : ""}><span class="slot-time">${formatTime(start)} – ${formatTime(start + 60)}</span><small>${past ? "Already passed" : "Tap to book"}</small></button>`;
@@ -67,7 +106,7 @@ function renderSlots() {
 }
 prevDay.addEventListener("click", () => { dayOffset--; renderSlots(); });
 nextDay.addEventListener("click", () => { dayOffset++; renderSlots(); });
-function goToGoogleBooking() { window.location.assign(GOOGLE_BOOKING_URL); }
+function goToGoogleBooking() { window.open(GOOGLE_BOOKING_URL, "_blank", "noopener"); }
 function startBooking() { goToGoogleBooking(); }
 renderSlots();
 document.querySelector("#bookNow").addEventListener("click", startBooking);
@@ -98,8 +137,12 @@ document.querySelector("#groupForm").addEventListener("submit", event => {
   });
 });
 const surveyDialog = document.querySelector("#surveyDialog");
-const surveyMonth = new Date().toISOString().slice(0, 7);
-function openSurvey() { surveyDialog.showModal(); }
+const surveyMonth = new Date().toLocaleDateString("en-CA").slice(0, 7);
+function surveyDoneThisMonth() { try { return localStorage.getItem("the-point-survey-completed") === surveyMonth; } catch { return false; } }
+function openSurvey() {
+  if (surveyDoneThisMonth()) return notify("You’ve already done this month’s check-in. Thanks! See you next month.");
+  surveyDialog.showModal();
+}
 document.querySelector("#openSurvey").addEventListener("click", openSurvey);
 document.querySelector("#surveyLater").addEventListener("click", () => surveyDialog.close());
 document.querySelector("#surveyForm").addEventListener("submit", event => {
@@ -108,7 +151,6 @@ document.querySelector("#surveyForm").addEventListener("submit", event => {
   const data = new FormData(form);
   const body = [
     `Name: ${data.get("surveyName")}`,
-    `Email or phone: ${data.get("surveyContact")}`,
     "",
     `1. Overall rating: ${data.get("rating")} out of 5 stars`,
     `2. App made booking easier: ${data.get("appHelped") === "yes" ? "Yes" : "No"}`,
@@ -118,8 +160,8 @@ document.querySelector("#surveyForm").addEventListener("submit", event => {
     `4. Snack ideas:\n${data.get("snacks") || "No answer"}`
   ].join("\n");
   const subject = `Monthly check-in survey: ${data.get("surveyName")} (${surveyMonth})`;
-  submitForm(form, surveyDialog, subject, body, data.get("surveyContact"), {
+  submitForm(form, surveyDialog, subject, body, null, {
     sent: "Thanks! You’re entered into the $50 gift-card draw.",
     email: "Your email app is opening with your answers. Press Send to enter the draw."
-  }).then(sent => { if (sent) localStorage.setItem("the-point-survey-completed", surveyMonth); });
+  }).then(sent => { if (sent) try { localStorage.setItem("the-point-survey-completed", surveyMonth); } catch {} });
 });
